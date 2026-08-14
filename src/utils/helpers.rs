@@ -1,10 +1,24 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 static SUDO_PASSWORD: Mutex<Option<String>> = Mutex::new(None);
+
+/// Global cap on command timeouts (seconds). 0 = use per-operation defaults.
+static TIMEOUT_CAP: AtomicU64 = AtomicU64::new(0);
+
+pub fn set_command_timeout_cap(secs: u64) {
+    TIMEOUT_CAP.store(secs, Ordering::Relaxed);
+}
+
+fn apply_cap(timeout_secs: u64) -> Duration {
+    let cap = TIMEOUT_CAP.load(Ordering::Relaxed);
+    let effective = if cap > 0 { cap.min(timeout_secs) } else { timeout_secs };
+    Duration::from_secs(effective)
+}
 
 pub fn set_sudo_password(pw: String) {
     if let Ok(mut guard) = SUDO_PASSWORD.lock() {
@@ -68,7 +82,7 @@ pub fn run_cmd(cmd: &[&str], timeout_secs: u64) -> CmdResult {
         let _ = tx_err.send(String::new());
     }
 
-    let timeout = Duration::from_secs(timeout_secs);
+    let timeout = apply_cap(timeout_secs);
     let start = Instant::now();
     let code = loop {
         match child.try_wait() {
@@ -158,7 +172,7 @@ pub fn run_as_root(cmd: &[&str], timeout_secs: u64) -> CmdResult {
         let _ = tx_err.send(String::new());
     }
 
-    let timeout = Duration::from_secs(timeout_secs);
+    let timeout = apply_cap(timeout_secs);
     let start = Instant::now();
     let code = loop {
         match child.try_wait() {
@@ -270,7 +284,7 @@ pub fn run_as_root_live<F: FnMut(String) + Send + 'static>(
         let _ = tx_done.send(());
     });
 
-    let timeout = Duration::from_secs(timeout_secs);
+    let timeout = apply_cap(timeout_secs);
     let finished = match rx_done.recv_timeout(timeout) {
         Ok(()) => true,
         Err(_) => false,

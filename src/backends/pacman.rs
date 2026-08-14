@@ -1,22 +1,27 @@
 use super::{Backend, BackendResult, PackageInfo};
+use crate::settings::Settings;
 use crate::utils::helpers::{self, check_command, run_as_root};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 pub struct PacmanBackend {
-    enabled: AtomicBool,
+    settings: Arc<Mutex<Settings>>,
 }
 
 impl PacmanBackend {
-    pub fn new() -> Self {
-        Self { enabled: AtomicBool::new(check_command("pacman")) }
+    pub fn new(settings: Arc<Mutex<Settings>>) -> Self {
+        Self { settings }
     }
 }
 
 impl Backend for PacmanBackend {
     fn name(&self) -> &str { "pacman" }
     fn icon(&self) -> &str { "system-software-install" }
-    fn enabled(&self) -> bool { self.enabled.load(Ordering::Relaxed) }
-    fn set_enabled(&self, val: bool) { self.enabled.store(val, Ordering::Relaxed); }
+    fn enabled(&self) -> bool {
+        self.settings.lock().unwrap().pacman_enabled && check_command("pacman")
+    }
+    fn set_enabled(&self, val: bool) {
+        self.settings.lock().unwrap().pacman_enabled = val;
+    }
 
     fn refresh(&self) { let _ = run_as_root(&["pacman", "-Sy"], 120); }
 
@@ -49,11 +54,15 @@ impl Backend for PacmanBackend {
 
     fn install(&self, name: &str, version: Option<&str>) -> BackendResult {
         match version {
-            Some(v) => { let pv = format!("{}={}", name, v);
+            Some(v) => {
+                let pv = format!("{}={}", name, v);
                 let r = run_as_root(&["pacman", "-S", "--noconfirm", &pv], 300);
-                (r.code, r.stdout, r.stderr) }
-            None => { let r = run_as_root(&["pacman", "-S", "--noconfirm", name], 300);
-                (r.code, r.stdout, r.stderr) }
+                (r.code, r.stdout, r.stderr)
+            }
+            None => {
+                let r = run_as_root(&["pacman", "-S", "--noconfirm", name], 300);
+                (r.code, r.stdout, r.stderr)
+            }
         }
     }
 

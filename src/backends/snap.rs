@@ -1,18 +1,27 @@
 use super::{Backend, BackendResult, PackageInfo};
+use crate::settings::Settings;
 use crate::utils::helpers::{self, check_command, run_as_root};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
-pub struct SnapBackend { enabled: AtomicBool }
+pub struct SnapBackend {
+    settings: Arc<Mutex<Settings>>,
+}
 
 impl SnapBackend {
-    pub fn new() -> Self { Self { enabled: AtomicBool::new(check_command("snap")) } }
+    pub fn new(settings: Arc<Mutex<Settings>>) -> Self {
+        Self { settings }
+    }
 }
 
 impl Backend for SnapBackend {
     fn name(&self) -> &str { "Snap" }
     fn icon(&self) -> &str { "package-x-generic" }
-    fn enabled(&self) -> bool { self.enabled.load(Ordering::Relaxed) }
-    fn set_enabled(&self, val: bool) { self.enabled.store(val, Ordering::Relaxed); }
+    fn enabled(&self) -> bool {
+        self.settings.lock().unwrap().snap_enabled && check_command("snap")
+    }
+    fn set_enabled(&self, val: bool) {
+        self.settings.lock().unwrap().snap_enabled = val;
+    }
     fn refresh(&self) {}
 
     fn search(&self, query: &str) -> Vec<PackageInfo> {
@@ -34,10 +43,14 @@ impl Backend for SnapBackend {
 
     fn install(&self, name: &str, version: Option<&str>) -> BackendResult {
         match version {
-            Some(v) => { let r = run_as_root(&["snap", "install", name, "--channel", v], 300);
-                (r.code, r.stdout, r.stderr) }
-            None => { let r = run_as_root(&["snap", "install", name], 300);
-                (r.code, r.stdout, r.stderr) }
+            Some(v) => {
+                let r = run_as_root(&["snap", "install", name, "--channel", v], 300);
+                (r.code, r.stdout, r.stderr)
+            }
+            None => {
+                let r = run_as_root(&["snap", "install", name], 300);
+                (r.code, r.stdout, r.stderr)
+            }
         }
     }
 
@@ -114,7 +127,10 @@ impl Backend for SnapBackend {
 
     fn install_self(&self) -> BackendResult {
         let r = run_as_root(&["pacman", "-S", "--noconfirm", "snapd"], 300);
-        if r.code == 0 { self.set_enabled(true); }
+        if r.code == 0 {
+            self.settings.lock().unwrap().snap_enabled = true;
+            let _ = run_as_root(&["systemctl", "enable", "--now", "snapd.socket"], 60);
+        }
         (r.code, r.stdout, r.stderr)
     }
 }

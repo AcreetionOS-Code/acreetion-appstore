@@ -1,7 +1,9 @@
 [package]
 name = "acreetion_appstore"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+description = "AcreetionOS App Store — fast native package manager with Pacman, AUR, Flatpak, Snap and AppImage support"
+license = "MIT"
 
 [dependencies]
 gtk4 = { version = "0.9", features = ["v4_10"] }
@@ -9,3 +11,5 @@ glib = "0.20"
 pango = "0.20"
 futures = "0.3"
 async-std = { version = "1.12", features = ["attributes"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"

@@ -5,7 +5,9 @@ pub mod flatpak;
 pub mod snap;
 pub mod appimage;
 
+use crate::settings::Settings;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 pub type BackendResult = (i32, String, String);
 
@@ -64,22 +66,42 @@ pub trait Backend: Send + Sync {
     fn get_versions(&self, name: &str) -> Vec<String>;
     fn get_info(&self, name: &str) -> PackageInfo;
     fn install_self(&self) -> BackendResult;
+    /// Directory AppImage downloads land in (empty string = not applicable).
+    fn primary_download_dir(&self) -> String { String::new() }
 }
 
 pub struct BackendManager {
     pub backends: HashMap<String, Box<dyn Backend>>,
+    pub settings: Arc<Mutex<Settings>>,
+    /// The AUR helper resolved from settings + what's installed.
+    pub aur_helper: Mutex<Option<crate::settings::AurHelper>>,
 }
 
 impl BackendManager {
-    pub fn new() -> Self {
-        let mut bm = Self { backends: HashMap::new() };
-        bm.backends.insert("pacman".into(), Box::new(pacman::PacmanBackend::new()));
-        bm.backends.insert("yay".into(), Box::new(yay::YayBackend::new()));
-        bm.backends.insert("paru".into(), Box::new(paru::ParuBackend::new()));
-        bm.backends.insert("flatpak".into(), Box::new(flatpak::FlatpakBackend::new()));
-        bm.backends.insert("snap".into(), Box::new(snap::SnapBackend::new()));
-        bm.backends.insert("appimage".into(), Box::new(appimage::AppImageBackend::new()));
+    pub fn new(settings: Arc<Mutex<Settings>>) -> Self {
+        let mut bm = Self {
+            backends: HashMap::new(),
+            aur_helper: Mutex::new(None),
+            settings: settings.clone(),
+        };
+        bm.backends.insert("pacman".into(), Box::new(pacman::PacmanBackend::new(settings.clone())));
+        bm.backends.insert("yay".into(), Box::new(yay::YayBackend::new(settings.clone())));
+        bm.backends.insert("paru".into(), Box::new(paru::ParuBackend::new(settings.clone())));
+        bm.backends.insert("flatpak".into(), Box::new(flatpak::FlatpakBackend::new(settings.clone())));
+        bm.backends.insert("snap".into(), Box::new(snap::SnapBackend::new(settings.clone())));
+        bm.backends.insert("appimage".into(), Box::new(appimage::AppImageBackend::new(settings.clone())));
+        bm.refresh_aur_helper();
         bm
+    }
+
+    /// Recompute which AUR helper (if any) should be active, from settings + binaries.
+    pub fn refresh_aur_helper(&self) {
+        let s = self.settings.lock().unwrap();
+        let helper = s.resolved_aur_helper(
+            crate::utils::helpers::check_command("yay"),
+            crate::utils::helpers::check_command("paru"),
+        );
+        *self.aur_helper.lock().unwrap() = helper;
     }
 
     pub fn enabled_backends(&self) -> Vec<(&str, &dyn Backend)> {

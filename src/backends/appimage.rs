@@ -1,23 +1,41 @@
-use super::{Backend, PackageInfo};
+use super::{Backend, BackendResult, PackageInfo};
+use crate::settings::Settings;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 pub struct AppImageBackend {
-    pub enabled: bool,
+    settings: Arc<Mutex<Settings>>,
 }
 
 impl AppImageBackend {
-    pub fn new() -> Self {
-        Self { enabled: true }
+    pub fn new(settings: Arc<Mutex<Settings>>) -> Self {
+        Self { settings }
+    }
+
+    fn expand_dir(dir: &str) -> String {
+        if let Some(rest) = dir.strip_prefix("~/") {
+            let home = std::env::var("HOME").unwrap_or_default();
+            if !home.is_empty() {
+                return format!("{}/{}", home, rest);
+            }
+        }
+        dir.to_string()
+    }
+
+    fn search_dirs(&self) -> Vec<String> {
+        self.settings
+            .lock()
+            .unwrap()
+            .appimage_dirs
+            .iter()
+            .map(|d| Self::expand_dir(d))
+            .collect()
     }
 
     fn discover_local(&self) -> Vec<PackageInfo> {
         let mut results = Vec::new();
-        let dirs = vec![
-            format!("{}/Applications", std::env::var("HOME").unwrap_or_default()),
-            format!("{}/.local/bin", std::env::var("HOME").unwrap_or_default()),
-        ];
-        for dir in &dirs {
-            let path = Path::new(dir);
+        for dir in self.search_dirs() {
+            let path = Path::new(&dir);
             if path.is_dir() {
                 if let Ok(entries) = std::fs::read_dir(path) {
                     for entry in entries.flatten() {
@@ -60,10 +78,30 @@ fn format_size(bytes: u64) -> String {
 impl Backend for AppImageBackend {
     fn name(&self) -> &str { "AppImage" }
     fn icon(&self) -> &str { "application-x-executable" }
-    fn enabled(&self) -> bool { true }
-    fn set_enabled(&self, _val: bool) {}
+    fn enabled(&self) -> bool {
+        self.settings.lock().unwrap().appimage_enabled
+    }
+    fn set_enabled(&self, val: bool) {
+        self.settings.lock().unwrap().appimage_enabled = val;
+    }
 
-    fn refresh(&self) {}
+    fn refresh(&self) {
+        let s = self.settings.lock().unwrap();
+        let scan = s.appimage_scan_on_launch;
+        let register = s.appimage_register_appimaged;
+        drop(s);
+        let _ = scan;
+        if register {
+            // Best-effort: make sure the AppImage daemon is running so new
+            // AppImages in ~/Applications get integrated into the desktop.
+            for daemon in ["appimaged", "appimagelauncherd"] {
+                if crate::utils::helpers::check_command(daemon) {
+                    let _ = std::process::Command::new(daemon).spawn();
+                    break;
+                }
+            }
+        }
+    }
 
     fn search(&self, query: &str) -> Vec<PackageInfo> {
         let all = self.discover_local();
@@ -72,17 +110,13 @@ impl Backend for AppImageBackend {
         all.into_iter().filter(|p| p.name.to_lowercase().contains(&q)).collect()
     }
 
-    fn install(&self, _name: &str, _version: Option<&str>) -> (i32, String, String) {
-        (1, "".to_string(), "Download AppImages manually to ~/Applications/".to_string())
+    fn install(&self, _name: &str, _version: Option<&str>) -> BackendResult {
+        (1, "".to_string(), "Download AppImages from the detail view or manually to ~/Applications/".to_string())
     }
 
-    fn remove(&self, name: &str) -> (i32, String, String) {
-        let dirs = vec![
-            format!("{}/Applications", std::env::var("HOME").unwrap_or_default()),
-            format!("{}/.local/bin", std::env::var("HOME").unwrap_or_default()),
-        ];
-        for dir in &dirs {
-            let path = Path::new(dir);
+    fn remove(&self, name: &str) -> BackendResult {
+        for dir in self.search_dirs() {
+            let path = Path::new(&dir);
             if path.is_dir() {
                 if let Ok(entries) = std::fs::read_dir(path) {
                     for entry in entries.flatten() {
@@ -122,7 +156,16 @@ impl Backend for AppImageBackend {
             })
     }
 
-    fn install_self(&self) -> (i32, String, String) {
+    fn install_self(&self) -> BackendResult {
         (0, String::new(), String::new())
+    }
+
+    fn primary_download_dir(&self) -> String {
+        self.search_dirs()
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| {
+                format!("{}/Applications", std::env::var("HOME").unwrap_or_default())
+            })
     }
 }

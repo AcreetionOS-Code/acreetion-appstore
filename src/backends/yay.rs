@@ -1,24 +1,67 @@
 use super::{Backend, BackendResult, PackageInfo};
+use crate::settings::{AurHelper, Settings};
 use crate::utils::helpers::{self, check_command};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
-pub struct YayBackend { enabled: AtomicBool }
+pub struct YayBackend {
+    settings: Arc<Mutex<Settings>>,
+}
 
 impl YayBackend {
-    pub fn new() -> Self { Self { enabled: AtomicBool::new(check_command("yay")) } }
+    pub fn new(settings: Arc<Mutex<Settings>>) -> Self {
+        Self { settings }
+    }
+
+    /// Extra flags for install/build derived from settings.
+    fn build_flags(&self) -> Vec<String> {
+        let s = self.settings.lock().unwrap();
+        let mut flags = Vec::new();
+        if !s.aur_build_dir.is_empty() {
+            flags.push("--builddir".to_string());
+            flags.push(s.aur_build_dir.clone());
+        }
+        if s.aur_clean_build {
+            flags.push("--cleanbuild".to_string());
+        }
+        if s.aur_skip_review {
+            flags.push("--noreview".to_string());
+        }
+        flags
+    }
 }
 
 impl Backend for YayBackend {
     fn name(&self) -> &str { "AUR (yay)" }
     fn icon(&self) -> &str { "applications-engineering" }
-    fn enabled(&self) -> bool { self.enabled.load(Ordering::Relaxed) }
-    fn set_enabled(&self, val: bool) { self.enabled.store(val, Ordering::Relaxed); }
+    fn enabled(&self) -> bool {
+        let s = self.settings.lock().unwrap();
+        if !s.aur_enabled || !check_command("yay") { return false; }
+        match s.aur_helper {
+            AurHelper::Yay => true,
+            AurHelper::Auto => !check_command("paru"),
+            AurHelper::Paru => false,
+        }
+    }
+    fn set_enabled(&self, val: bool) {
+        self.settings.lock().unwrap().aur_enabled = val;
+    }
 
-    fn refresh(&self) { if self.enabled() { let _ = helpers::run_cmd(&["yay", "-Sy"], 120); } }
+    fn refresh(&self) {
+        let s = self.settings.lock().unwrap();
+        if s.aur_refresh_on_sync {
+            let _ = helpers::run_cmd(&["yay", "-Sy"], 120);
+        }
+    }
 
     fn search(&self, query: &str) -> Vec<PackageInfo> {
         if !self.enabled() { return vec![]; }
-        let r = helpers::run_cmd(&["yay", "-Ss", query], 180);
+        let s = self.settings.lock().unwrap();
+        let mut args = vec!["yay", "-Ss"];
+        if s.aur_include_devel { args.push("--devel"); }
+        if s.aur_sort_by_votes { args.push("--sortby"); args.push("votes"); }
+        args.push(query);
+        let r = helpers::run_cmd(&args, 180);
+        drop(s);
         if r.code != 0 { return vec![]; }
         let mut results = Vec::new();
         let mut current: Option<PackageInfo> = None;
@@ -45,12 +88,23 @@ impl Backend for YayBackend {
     }
 
     fn install(&self, name: &str, version: Option<&str>) -> BackendResult {
+        let flags = self.build_flags();
+        let mut args = vec!["yay", "-S", "--noconfirm"];
+        for f in &flags {
+            args.push(f.as_str());
+        }
         match version {
-            Some(v) => { let pkg = format!("{}={}", name, v);
-                let r = helpers::run_cmd(&["yay", "-S", "--noconfirm", &pkg], 300);
-                (r.code, r.stdout, r.stderr) }
-            None => { let r = helpers::run_cmd(&["yay", "-S", "--noconfirm", name], 300);
-                (r.code, r.stdout, r.stderr) }
+            Some(v) => {
+                let pkg = format!("{}={}", name, v);
+                args.push(pkg.as_str());
+                let r = helpers::run_cmd(&args, 300);
+                (r.code, r.stdout, r.stderr)
+            }
+            None => {
+                args.push(name);
+                let r = helpers::run_cmd(&args, 300);
+                (r.code, r.stdout, r.stderr)
+            }
         }
     }
 
@@ -74,7 +128,11 @@ impl Backend for YayBackend {
 
     fn check_updates(&self) -> Vec<PackageInfo> {
         if !self.enabled() { return vec![]; }
-        let r = helpers::run_cmd(&["yay", "-Qu"], 120);
+        let s = self.settings.lock().unwrap();
+        if !s.aur_check_updates { return vec![]; }
+        let mut args = vec!["yay", "-Qu"];
+        if s.aur_include_devel { args.push("--devel"); }
+        let r = helpers::run_cmd(&args, 120);
         if r.code != 0 && r.code != 1 { return vec![]; }
         r.stdout.lines().filter_map(|line| {
             let parts: Vec<&str> = line.splitn(3, ' ').collect();
@@ -122,5 +180,9 @@ impl Backend for YayBackend {
         pi
     }
 
-    fn install_self(&self) -> BackendResult { (0, String::new(), String::new()) }
+    fn install_self(&self) -> BackendResult {
+        let r = helpers::run_cmd(&["pacman", "-S", "--noconfirm", "yay"], 300);
+        if r.code == 0 { self.settings.lock().unwrap().aur_enabled = true; }
+        (r.code, r.stdout, r.stderr)
+    }
 }
